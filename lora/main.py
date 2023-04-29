@@ -254,7 +254,7 @@ def train():
     model.to(device)
 
     training_args = TrainingArguments(
-        "output",
+        output_dir="./output",
         fp16=True,
         save_steps=500,
         save_total_limit=5,
@@ -269,7 +269,7 @@ def train():
         seed=0,
         data_seed=0,
         group_by_length=False,
-        dataloader_pin_memory=False
+        dataloader_pin_memory=False,
     )
 
     class ModifiedTrainer(Trainer):
