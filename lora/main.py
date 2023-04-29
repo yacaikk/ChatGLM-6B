@@ -1,3 +1,4 @@
+import json
 import os
 from typing import Dict, List, Union
 
@@ -17,11 +18,12 @@ def load_lora_config(model):
     config = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
         inference_mode=False,
-        r=8,
+        r=32,
         lora_alpha=32,
         lora_dropout=0.1,
-        target_modules=["query_key_value"]
+        target_modules=['dense', 'dense_h_to_4h', 'dense_4h_to_h', 'query_key_value']
     )
+    # ['dense','dense_h_to_4h','dense_4h_to_h','query_key_value']
     return get_peft_model(model, config)
 
 
@@ -207,12 +209,44 @@ def save_tuned_parameters(model, path):
     torch.save(saved_params, path)
 
 
+def load_train_data(file_path):
+    with open(file_path, 'r', encoding='utf-8') as f:
+        objs = [json.loads(l.rstrip("\n")) for l in f.readlines()]
+
+    a = [{"prompt": "你好", "response": "你好，我是一个聊天机器人，由yacai的微信的聊天记录训练而来。", "history": []},
+         {"prompt": "您好", "response": "您好，我是一款聊天机器人，我可以陪您聊天、解答问题。", "history": []},
+         {"prompt": "在吗", "response": "您好，我是一款聊天机器人，我可以陪您聊天、解答问题。", "history": []},
+         {"prompt": "有人吗", "response": "您好，我是一款聊天机器人，我可以陪您聊天、解答问题,根据微信的聊天记录训练而来。", "history": []},
+         {"prompt": "请问你能干什么", "response": "您好，我是一款聊天机器人，我可以陪您聊天、解答问题。", "history": []},
+         {"prompt": "你好", "response": "你好，我是一个聊天机器人，由yacai的微信的聊天记录训练而来。", "history": []},
+         {"prompt": "您好", "response": "您好，有啥问题吗", "history": []},
+         {"prompt": "在吗", "response": "有什么我可以帮您的吗？我是一个聊天机器人，由微信的聊天记录训练而来。", "history": []},
+         {"prompt": "有人吗", "response": "您好，我是一名智能机器人，可以陪您聊天、猜谜语、讲笑话等。", "history": []},
+         {"prompt": "你是机器人吗", "response": "是的，我是一个聊天机器人，可以和您聊天、解答问题、提供帮助。", "history": []},
+         {"prompt": "请问你能干什么", "response": "您好，我是一名智能聊天机器人，可以回答您的问题、谈天说地。", "history": []},
+         {"prompt": "请问可以跟你聊天吗", "response": "当然可以，我是一款AI聊天机器人，经过不断学习和优化，可以进行人性化的对话。", "history": []},
+         {"prompt": "你能理解中文吗", "response": "是的，我能够理解中文，并且可以模拟人类的语言行为与您进行交流。", "history": []},
+         {"prompt": "你是什么", "response": "我是一个聊天机器人，通过人工智能技术和大量数据的训练，可以进行智能对话。", "history": []},
+         {"prompt": "嗨", "response": "嗨，我是一款聊天机器人，通过yacai的微信聊天记录进行了训练。", "history": []},
+         {"prompt": "您好呀", "response": "您好呀，我是一个聊天机器人，基于yacai的微信聊天记录进行了训练。", "history": []},
+         {"prompt": "你好啊", "response": "你好啊，我是一名聊天机器人，根据yacai的微信聊天记录进行了训练。", "history": []},
+         {"prompt": "您好呢", "response": "您好呢，我是一台聊天机器人，通过yacai的微信聊天记录进行了训练。", "history": []},
+         {"prompt": "嘿", "response": "嘿，我是一个聊天机器人，由yacai的微信聊天记录进行了训练。", "history": []},
+         {"prompt": "你好哇", "response": "你好哇，我是一名聊天机器人，受过yacai的微信聊天记录的训练。", "history": []},
+         {"prompt": "你好嘞", "response": "你好嘞，我是一款聊天机器人，基于yacai的微信聊天记录进行了训练。", "history": []},
+         {"prompt": "您好啦", "response": "您好啦，我是一台聊天机器人，由yacai的微信聊天记录进行了训练。", "history": []},
+         ]
+    objs.extend(a)
+
+    return objs
+
+
 def train():
     local_weight = "../weight/chatglm-6b"
     checkpoint = "THUDM/chatglm-6b"
     revision = "096f3de6b4959ce38bef7bb05f3129c931a3084e"
-    model = AutoModel.from_pretrained(local_weight, revision=revision, trust_remote_code=True)
-    tokenizer = AutoTokenizer.from_pretrained(local_weight, revision=revision, trust_remote_code=True)
+    model = AutoModel.from_pretrained(local_weight, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(local_weight, trust_remote_code=True)
 
     model = load_lora_config(model)
     model.print_trainable_parameters()
@@ -223,12 +257,14 @@ def train():
         "output",
         fp16=True,
         save_steps=500,
-        save_total_limit=3,
+        save_total_limit=5,
         gradient_accumulation_steps=1,
-        per_device_train_batch_size=1,
+        per_device_train_batch_size=16,
         learning_rate=1e-4,
-        max_steps=1500,
+        # max_steps=3000,
         logging_steps=50,
+        num_train_epochs=10,
+        save_strategy="epoch",
         remove_unused_columns=False,
         seed=0,
         data_seed=0,
@@ -248,7 +284,8 @@ def train():
 
     test_data = [{"prompt": "在看考公务员\n你找工作没，松松", "response": "聊天嘛\n瑞瑞", "history": []},
                  {"prompt": "在看考公务员\n你找工作没，松松", "response": "聊天嘛\n瑞瑞", "history": []}]
-    train_dataset = MyDataset(test_data, tokenizer=tokenizer)
+    train_data = load_train_data("./WechatData/train.json")
+    train_dataset = MyDataset(train_data, tokenizer=tokenizer)
     trainer = ModifiedTrainer(
         model=model,
         train_dataset=train_dataset,
