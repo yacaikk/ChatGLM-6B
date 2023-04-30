@@ -1,6 +1,6 @@
 import json
 import os
-from typing import Dict, List, Union
+from typing import Dict, List, Union, Optional
 
 import torch
 from peft import LoraConfig, get_peft_model, TaskType
@@ -9,7 +9,7 @@ from transformers import AutoTokenizer, AutoModel
 from transformers import TrainingArguments, Trainer
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else 'cpu')
-max_src_length = 512
+max_src_length = 256
 max_dst_length = 64
 prefix = ""
 
@@ -19,9 +19,10 @@ def load_lora_config(model):
         task_type=TaskType.CAUSAL_LM,
         inference_mode=False,
         r=32,
-        lora_alpha=32,
+        lora_alpha=8,
         lora_dropout=0.1,
-        target_modules=['dense', 'dense_h_to_4h', 'dense_4h_to_h', 'query_key_value']
+        bias="none",
+        target_modules=['query_key_value']  # ['dense', 'dense_h_to_4h', 'dense_4h_to_h', 'query_key_value']
     )
     # ['dense','dense_h_to_4h','dense_4h_to_h','query_key_value']
     return get_peft_model(model, config)
@@ -174,10 +175,10 @@ def collate_fn(batch):
         position_ids.append(obj['position_ids'])
 
     return {
-        'input_ids': torch.stack(input_ids),
-        'attention_mask': torch.stack(attention_mask),
-        'labels': torch.stack(labels),
-        'position_ids': torch.stack(position_ids)
+        'input_ids': torch.stack(input_ids).to(device),
+        'attention_mask': torch.stack(attention_mask).to(device),
+        'labels': torch.stack(labels).to(device),
+        'position_ids': torch.stack(position_ids).to(device)
     }
 
 
@@ -237,6 +238,7 @@ def load_train_data(file_path):
          {"prompt": "您好啦", "response": "您好啦，我是一台聊天机器人，由yacai的微信聊天记录进行了训练。", "history": []},
          ]
     objs.extend(a)
+    print(objs[-10:])
 
     return objs
 
@@ -246,25 +248,38 @@ def train():
     checkpoint = "THUDM/chatglm-6b"
     revision = "096f3de6b4959ce38bef7bb05f3129c931a3084e"
     model = AutoModel.from_pretrained(local_weight, trust_remote_code=True)
+    # print(f"model quantize to 8 bit ")
+    # model = model.quantize(8)
     tokenizer = AutoTokenizer.from_pretrained(local_weight, trust_remote_code=True)
 
     model = load_lora_config(model)
+    model = model.half().to(device)
     model.print_trainable_parameters()
-
-    model.to(device)
 
     training_args = TrainingArguments(
         output_dir="./output",
-        fp16=True,
-        save_steps=500,
+        fp16=False,
+        gradient_accumulation_steps=16,
+        per_device_train_batch_size=1,
+        per_device_eval_batch_size=1,
+
+        num_train_epochs=5,
+        save_steps=1,  # 设置为 1，表示每个 epoch 结束时保存一次模型的权重
+        save_strategy="epoch",  # 设置为 "epoch"，表示按 epoch 保存模型的权重
         save_total_limit=5,
-        gradient_accumulation_steps=1,
-        per_device_train_batch_size=16,
-        learning_rate=1e-4,
+
+        evaluation_strategy="no",  # 禁用评估
+        eval_steps=1,
+
         # max_steps=3000,
-        logging_steps=50,
-        num_train_epochs=10,
-        save_strategy="epoch",
+        logging_strategy="steps",  # 设置 logging_strategy 为 "steps"
+        logging_steps=100,  # 设置 logging_steps 为打印损失的频率
+
+        weight_decay=0.1,
+        warmup_steps=1_000,
+        lr_scheduler_type="cosine",
+        learning_rate=5e-4,
+
         remove_unused_columns=False,
         seed=0,
         data_seed=0,
@@ -279,16 +294,35 @@ def train():
                 input_ids=inputs["input_ids"],
                 attention_mask=inputs["attention_mask"],
                 position_ids=inputs["position_ids"],
-                labels=inputs["labels"],
+                labels=inputs["labels"]
             ).loss
+
+        def _save(self, output_dir: Optional[str] = None, state_dict=None):
+            # If we are executing this function, we are the process zero, so we don't check for that.
+            output_dir = output_dir if output_dir is not None else self.args.output_dir
+            os.makedirs(output_dir, exist_ok=True)
+
+            def save_tunable_parameters(model, path):
+                saved_params = {
+                    k: v.to("cpu") for k, v in model.named_parameters() if v.requires_grad
+                }
+                # saved_params = model.state_dict()
+                torch.save(saved_params, path)
+                print(f"#### 保存 lora 权重:{path}")
+
+            save_tunable_parameters(
+                self.model, os.path.join(output_dir, "chatglm-lora.pt")
+            )
 
     test_data = [{"prompt": "在看考公务员\n你找工作没，松松", "response": "聊天嘛\n瑞瑞", "history": []},
                  {"prompt": "在看考公务员\n你找工作没，松松", "response": "聊天嘛\n瑞瑞", "history": []}]
     train_data = load_train_data("./WechatData/train.json")
     train_dataset = MyDataset(train_data, tokenizer=tokenizer)
+    eval_dataset = MyDataset(train_data, tokenizer=tokenizer)
     trainer = ModifiedTrainer(
         model=model,
         train_dataset=train_dataset,
+        # eval_dataset=train_dataset,  # 将 eval_dataset 参数设置为 None
         args=training_args,
         data_collator=collate_fn,
         tokenizer=tokenizer
@@ -297,6 +331,7 @@ def train():
     trainer.train()
 
     save_tuned_parameters(model, os.path.join("./output", "chatglm-6b-lora.pt"))
+    print("done!!!")
 
 
 def eval():
