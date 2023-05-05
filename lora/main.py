@@ -1,3 +1,4 @@
+from transformers import AdamW, get_scheduler
 import json
 import os
 from typing import Dict, List, Union, Optional
@@ -12,6 +13,11 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else 'cpu')
 max_src_length = 256
 max_dst_length = 64
 prefix = ""
+
+N_EPOCH = 5
+BATCH_SIZE = 1
+ACCUMULATION_STEPS = 16 // BATCH_SIZE
+print(f"############### N_EPOCH:{N_EPOCH},BATCH_SIZE:{BATCH_SIZE},ACCUMULATION_STEPS:{ACCUMULATION_STEPS} #####################")
 
 
 def load_lora_config(model):
@@ -259,11 +265,11 @@ def train():
     training_args = TrainingArguments(
         output_dir="./output",
         fp16=False,
-        gradient_accumulation_steps=16,
-        per_device_train_batch_size=1,
-        per_device_eval_batch_size=1,
+        gradient_accumulation_steps=ACCUMULATION_STEPS,
+        per_device_train_batch_size=BATCH_SIZE,
+        per_device_eval_batch_size=BATCH_SIZE * 2,
 
-        num_train_epochs=5,
+        num_train_epochs=N_EPOCH,
         save_steps=1,  # 设置为 1，表示每个 epoch 结束时保存一次模型的权重
         save_strategy="epoch",  # 设置为 "epoch"，表示按 epoch 保存模型的权重
         save_total_limit=5,
@@ -273,12 +279,12 @@ def train():
 
         # max_steps=3000,
         logging_strategy="steps",  # 设置 logging_strategy 为 "steps"
-        logging_steps=100,  # 设置 logging_steps 为打印损失的频率
+        logging_steps=10,  # 设置 logging_steps 为打印损失的频率
 
-        weight_decay=0.1,
-        warmup_steps=1_000,
-        lr_scheduler_type="cosine",
-        learning_rate=5e-4,
+        # weight_decay=0.1,
+        # warmup_steps=1_000,
+        # lr_scheduler_type="cosine",
+        # learning_rate=5e-4,
 
         remove_unused_columns=False,
         seed=0,
@@ -290,12 +296,14 @@ def train():
     class ModifiedTrainer(Trainer):
 
         def compute_loss(self, model, inputs, return_outputs=False):
-            return model(
+            loss = model(
                 input_ids=inputs["input_ids"],
-                attention_mask=inputs["attention_mask"],
-                position_ids=inputs["position_ids"],
+                # attention_mask=inputs["attention_mask"],
+                # position_ids=inputs["position_ids"],
                 labels=inputs["labels"]
             ).loss
+            # print(f"loss:{loss}")
+            return loss
 
         def _save(self, output_dir: Optional[str] = None, state_dict=None):
             # If we are executing this function, we are the process zero, so we don't check for that.
@@ -319,13 +327,35 @@ def train():
     train_data = load_train_data("./WechatData/train.json")
     train_dataset = MyDataset(train_data, tokenizer=tokenizer)
     eval_dataset = MyDataset(train_data, tokenizer=tokenizer)
+
+    # 获取需要求梯度的参数
+    grad_params = filter(lambda p: p.requires_grad, model.parameters())
+
+    # 定义自己的优化器
+    my_optimizer = AdamW(
+        params=grad_params,
+        lr=5e-5,  # 设置学习率
+        weight_decay=0.01  # 设置权重衰减
+    )
+
+    # 定义 lr_scheduler
+    num_training_steps = len(
+        train_dataset) // BATCH_SIZE * N_EPOCH
+    lr_scheduler = get_scheduler(
+        name="cosine",
+        optimizer=my_optimizer,
+        num_warmup_steps=1000,
+        num_training_steps=num_training_steps
+    )
+
     trainer = ModifiedTrainer(
         model=model,
         train_dataset=train_dataset,
         # eval_dataset=train_dataset,  # 将 eval_dataset 参数设置为 None
         args=training_args,
         data_collator=collate_fn,
-        tokenizer=tokenizer
+        tokenizer=tokenizer,
+        optimizers=(my_optimizer, lr_scheduler)
     )
 
     trainer.train()
